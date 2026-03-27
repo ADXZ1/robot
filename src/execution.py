@@ -127,23 +127,34 @@ class ExecutionThread(QThread):
 
             if arm == '左':
                 if mode == 'move_j':
-                    success = self._robot_controller.move_robot1(target_pose)
+                    method = self._robot_controller.move_robot1
                 elif mode == 'move_l':
-                    success = self._robot_controller.move_robot1l(target_pose)
+                    method = self._robot_controller.move_robot1l
                 else:
                     self.log_message.emit("moshiyichang")
                     return False
             else:
                 if mode == 'move_j':
-                    success = self._robot_controller.move_robot2(target_pose)
+                    method = self._robot_controller.move_robot2
                 elif mode == 'move_l':
-                    success = self._robot_controller.move_robot2l(target_pose)
+                    method = self._robot_controller.move_robot2l
                 else:
                     self.log_message.emit("moshiyichang")
                     return False
-            if success:
-                self.log_message.emit(f"机械臂移动执行完成")
-            return success
+
+            # 重试机制：处理通信抖动（-1 发送失败，-2 接收失败，-3 解析失败）
+            max_retries = 3
+            for attempt in range(1, max_retries + 1):
+                success = method(target_pose)
+                if success:
+                    self.log_message.emit(f"机械臂移动执行完成")
+                    return True
+                # 若非通信错误（ret==1 参数/状态错误），直接失败
+                self.log_message.emit(f"机械臂移动失败 (第{attempt}次)，重试中...")
+                time.sleep(0.5)
+
+            self.log_message.emit("机械臂移动重试次数耗尽")
+            return False
         except Exception as e:
             self.log_message.emit(f"执行机械臂移动出错: {str(e)}")
             return False
@@ -188,28 +199,45 @@ class ExecutionThread(QThread):
 
         if executor == '快换手':
             kuaihuanshou = Kuaihuanshou(port='/dev/hand')
-            if operation == '开':
-                kuaihuanshou.send_command('open')
-            elif operation == '关':
-                kuaihuanshou.send_command('close')
+            try:
+                if operation == '开':
+                    result = kuaihuanshou.send_command('open')
+                elif operation == '关':
+                    result = kuaihuanshou.send_command('close')
+                else:
+                    self.log_message.emit(f"未知的快换手操作: {operation}")
+                    return False
+                if result == "error" or result is False:
+                    self.log_message.emit(f"快换手操作失败: {result}")
+                    return False
+            finally:
+                kuaihuanshou.close()
+
         elif executor == '继电器':
             adp = RelayController()
-            if operation == '开':
-                if number == 1:
-                    adp.turn_on_relay_Y1()
-                elif number == 2:
-                    adp.turn_on_relay_Y2()
+            try:
+                if operation == '开':
+                    if number == 1:
+                        adp.turn_on_relay_Y1()
+                    elif number == 2:
+                        adp.turn_on_relay_Y2()
+                    else:
+                        self.log_message.emit(f"未知的编号: {number}")
+                        return False
+                elif operation == '关':
+                    if number == 1:
+                        adp.turn_off_relay_Y1()
+                    elif number == 2:
+                        adp.turn_off_relay_Y2()
+                    else:
+                        self.log_message.emit(f"未知的编号: {number}")
+                        return False
                 else:
-                    self.log_message.emit(f"未知的编号: {number}")
+                    self.log_message.emit(f"未知的继电器操作: {operation}")
                     return False
-            elif operation == '关':
-                if number == 1:
-                    adp.turn_off_relay_Y1()
-                elif number == 2:
-                    adp.turn_off_relay_Y2()
-                else:
-                    self.log_message.emit(f"未知的编号: {number}")
-                    return False
+            finally:
+                adp.close()
+
         elif executor == '夹爪':
             return self._execute_gripper(operation)
         elif executor == '吸液枪':
@@ -229,18 +257,26 @@ class ExecutionThread(QThread):
             self.log_message.emit("机械臂控制器未初始化")
             return False
 
-        try:
-            if operation == '开':
-                success = self._robot_controller.gripper_open_robot1()
-            else:
-                success = self._robot_controller.gripper_close_robot1()
+        method = (
+            self._robot_controller.gripper_open_robot1
+            if operation == '开'
+            else self._robot_controller.gripper_close_robot1
+        )
 
-            if success:
-                self.log_message.emit(f"夹爪{operation}执行完成")
-            return success
-        except Exception as e:
-            self.log_message.emit(f"执行夹爪出错: {str(e)}")
-            return False
+        max_retries = 3
+        for attempt in range(1, max_retries + 1):
+            try:
+                success = method()
+                if success:
+                    self.log_message.emit(f"夹爪{operation}执行完成")
+                    return True
+                self.log_message.emit(f"夹爪{operation}失败 (第{attempt}次)，重试中...")
+            except Exception as e:
+                self.log_message.emit(f"执行夹爪出错: {str(e)} (第{attempt}次)")
+            time.sleep(0.5)
+
+        self.log_message.emit("夹爪重试次数耗尽")
+        return False
 
     def _execute_pipette(self, params: dict) -> bool:
         """执行吸液枪动作（吸/吐）"""

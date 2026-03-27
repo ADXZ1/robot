@@ -1,5 +1,7 @@
 import sys
 import os
+from pathlib import Path
+from typing import List
 from PyQt6.QtWidgets import (QMainWindow, QWidget, QHBoxLayout, QVBoxLayout,
                             QSplitter, QMessageBox, QFileDialog, QMenu,
                             QTabWidget, QPushButton, QLabel, QFrame)
@@ -18,6 +20,7 @@ if vertical_grab_path not in sys.path:
 
 from .models import ActionDefinition, ActionType, SequenceItem, SequenceItemStatus
 from .widgets import ActionListWidget, SequenceListWidget, ControlPanel, LogWidget
+from .widgets.ai_assistant import AIAssistantWidget
 from .dialogs import ActionConfigDialog
 from .storage import StorageManager
 from .execution import ExecutionThread
@@ -63,6 +66,10 @@ class MainWindow(QMainWindow):
 
         self.init_ui()
         self.load_actions()
+
+        # 设置 AI助手的主窗口引用（用于执行桥接器）
+        if hasattr(self, 'ai_assistant_widget'):
+            self.ai_assistant_widget.set_main_window(self)
 
         # 自动初始化机械臂和移液枪
         if ROBOT_AVAILABLE:
@@ -144,6 +151,10 @@ class MainWindow(QMainWindow):
         self.action_tabs.addTab(self.inspect_list, "检测类")
         self.action_tabs.addTab(self.change_gun_list, "换枪类")
 
+        # AI助手 Tab
+        self.ai_assistant_widget = AIAssistantWidget()
+        self.action_tabs.addTab(self.ai_assistant_widget, "🤖 AI助手")
+
         layout.addWidget(self.action_tabs, stretch=1)
 
         # 底部按钮行
@@ -168,8 +179,9 @@ class MainWindow(QMainWindow):
         layout.setContentsMargins(2, 2, 2, 2)
         layout.setSpacing(2)
 
-        # 序列列表：自占剩余空间
+        # 序列列表：自占剩余空间（横向卡片区需保证最小高度，避免被挤没）
         self.sequence_list = SequenceListWidget()
+        self.sequence_list.setMinimumHeight(140)
         layout.addWidget(self.sequence_list, stretch=2)
 
         # 控制面板
@@ -452,16 +464,16 @@ class MainWindow(QMainWindow):
             self, "保存任务序列", "", "Task Files (*.task)"
         )
         if filename:
-            task_name = filename.split('/')[-1]
+            task_name = Path(filename).name
             StorageManager.save_sequence(sequence, task_name)
             self.log_widget.append_log(f"任务已保存: {task_name}")
 
     def load_task(self):
         filename, _ = QFileDialog.getOpenFileName(
-            self, "加载任务序列", "data/tasks", "Task Files (*.task)"
+            self, "加载任务序列", str(StorageManager.TASKS_DIR), "Task Files (*.task)"
         )
         if filename:
-            task_name = filename.split('/')[-1]
+            task_name = Path(filename).name
             sequence = StorageManager.load_sequence(task_name)
             self.sequence_list.clear()
             for item in sequence:
@@ -508,6 +520,11 @@ class MainWindow(QMainWindow):
             self.execution_thread.stop()
             self.log_widget.append_log("紧急停止已触发")
 
+    def on_execution_completed(self, success: bool):
+        self.log_widget.append_log("AI 序列执行完成" if success else "AI 序列执行失败")
+        self.is_paused = False
+        self.control_panel.pause_btn.setText("暂停")
+
     def on_step_started(self, index: int, item: SequenceItem):
         self.sequence_list.update_item_status(index, item)
         self.sequence_list.scrollToItem(self.sequence_list.item(index))
@@ -545,6 +562,51 @@ class MainWindow(QMainWindow):
         if current_row >= 0:
             self.sequence_list.takeItem(current_row)
             self.refresh_sequence_numbers()
+
+    def add_ai_sequence(
+        self,
+        sequence: List,
+        replace: bool = False,
+        stagger_interval_ms: int = 0,
+    ):
+        """将 AI 规划的动作同步到右侧序列区；replace=True 时先清空。
+        stagger_interval_ms>0 时按间隔逐项出现（类似从左拖到右侧的观感），需与执行启动延迟配合。"""
+        if not sequence:
+            return
+        normalized: list[SequenceItem] = []
+        for raw in sequence:
+            if isinstance(raw, dict):
+                normalized.append(SequenceItem.from_dict(raw))
+            else:
+                normalized.append(raw)
+        if replace:
+            self.sequence_list.clear_sequence()
+        if stagger_interval_ms <= 0:
+            for item in normalized:
+                self.sequence_list.add_sequence_item(item)
+            for i, item in enumerate(normalized):
+                item.status = SequenceItemStatus.PENDING
+                self.sequence_list.update_item_status(i, item)
+            self.log_widget.append_log(f"已同步执行序列到右侧，共 {len(normalized)} 个动作")
+            return
+
+        from PyQt6.QtCore import QTimer
+
+        self.log_widget.append_log(
+            f"正在将 {len(normalized)} 个动作载入右侧序列区（逐项显示）..."
+        )
+
+        for i, item in enumerate(normalized):
+            item.status = SequenceItemStatus.PENDING
+
+            def make_add(idx: int, seq_item: SequenceItem):
+                def _add():
+                    self.sequence_list.add_sequence_item(seq_item)
+                    self.sequence_list.update_item_status(idx, seq_item)
+
+                return _add
+
+            QTimer.singleShot(stagger_interval_ms * i, make_add(i, item))
 
     def clear_sequence(self):
         reply = QMessageBox.question(

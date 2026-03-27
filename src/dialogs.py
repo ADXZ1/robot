@@ -1,8 +1,136 @@
 from PyQt6.QtWidgets import (QDialog, QFormLayout, QLineEdit, QComboBox,
                             QDoubleSpinBox, QDialogButtonBox, QVBoxLayout,
-                            QHBoxLayout, QLabel, QSpinBox, QWidget, QStackedLayout)
-from PyQt6.QtCore import Qt
+                            QHBoxLayout, QLabel, QSpinBox, QWidget, QStackedLayout,
+                            QGroupBox, QListWidget, QListWidgetItem, QPushButton)
+from PyQt6.QtCore import Qt, pyqtSignal
+from PyQt6.QtGui import QColor
 from .models import ActionType, ActionDefinition
+
+
+class ActionPreviewDialog(QDialog):
+    """
+    动作预览对话框
+    显示 AI 生成的技能展开后的完整动作序列，供用户确认执行
+    """
+
+    # 信号
+    confirmed = pyqtSignal()  # 用户确认执行
+
+    def __init__(self, items: list, skill_info: dict, parent=None):
+        super().__init__(parent)
+        self._items = items
+        self._skill_info = skill_info
+        self._init_ui()
+
+    def _init_ui(self):
+        skill_name = self._skill_info.get("name", "未知技能")
+        icon = self._skill_info.get("icon", "🤖")
+        step_count = len(self._items)
+        estimated_time = self._skill_info.get("estimated_time", 0)
+
+        self.setWindowTitle(f"动作预览 - {icon} {skill_name} ({step_count}步)")
+        self.setMinimumSize(500, 400)
+
+        layout = QVBoxLayout(self)
+
+        # 技能信息
+        info_label = QLabel(f"技能: {icon} {skill_name}")
+        info_label.setStyleSheet("font-size: 14px; font-weight: bold;")
+        layout.addWidget(info_label)
+
+        desc_label = QLabel(f"描述: {self._skill_info.get('description', '')}")
+        desc_label.setWordWrap(True)
+        desc_label.setStyleSheet("color: #666; font-size: 12px;")
+        layout.addWidget(desc_label)
+
+        # 动作步骤列表
+        steps_group = QGroupBox(f"动作步骤 ({step_count}步)")
+        steps_layout = QVBoxLayout(steps_group)
+
+        self.step_list = QListWidget()
+        self._populate_step_list()
+        steps_layout.addWidget(self.step_list)
+
+        layout.addWidget(steps_group, stretch=1)
+
+        # 预计时间
+        time_label = QLabel(f"预计执行时间: ~{estimated_time:.0f}秒")
+        time_label.setStyleSheet("color: #666; font-size: 12px;")
+        layout.addWidget(time_label)
+
+        if estimated_time > 30:
+            warning_label = QLabel("提示：动作较多，执行时间较长")
+            warning_label.setStyleSheet("color: #f57c00; font-size: 12px;")
+            layout.addWidget(warning_label)
+
+        # 按钮
+        button_layout = QHBoxLayout()
+
+        cancel_button = QPushButton("取消")
+        cancel_button.clicked.connect(self.reject)
+        button_layout.addWidget(cancel_button)
+
+        button_layout.addStretch()
+
+        confirm_button = QPushButton("确认执行")
+        confirm_button.setStyleSheet("""
+            QPushButton {
+                background-color: #4CAF50;
+                color: white;
+                font-weight: bold;
+                padding: 8px 24px;
+                border: none;
+                border-radius: 4px;
+            }
+            QPushButton:hover {
+                background-color: #45a049;
+            }
+        """)
+        confirm_button.clicked.connect(self.accept_and_emit)
+        button_layout.addWidget(confirm_button)
+
+        layout.addLayout(button_layout)
+
+    def _populate_step_list(self):
+        action_type_names = {
+            "MOVE": "移动",
+            "MOVE_TO_POINT": "移动",
+            "MANIPULATE": "执行",
+            "ARM_ACTION": "执行",
+            "INSPECT": "检测",
+            "INSPECT_AND_OUTPUT": "检测",
+            "CHANGE_GUN": "换枪"
+        }
+
+        for idx, item in enumerate(self._items):
+            definition = item.get("definition", {})
+            action_name = definition.get("name", "未知")
+            action_type = definition.get("type", "MOVE")
+            parameters = definition.get("parameters", {})
+
+            type_display = action_type_names.get(action_type, action_type)
+
+            # 构建参数显示
+            param_strs = [f"{k}={v}" for k, v in parameters.items()]
+            param_text = ", ".join(param_strs) if param_strs else "无参数"
+
+            step_num = idx + 1
+            item_text = f"Step {step_num}: {action_name}"
+
+            list_item = QListWidgetItem(item_text)
+
+            tooltip = f"类型: {type_display}\n参数: {param_text}"
+            list_item.setToolTip(tooltip)
+
+            if step_num <= 3:
+                list_item.setForeground(QColor("#4CAF50"))
+
+            self.step_list.addItem(list_item)
+
+    def accept_and_emit(self):
+        """确认并发送信号"""
+        self.confirmed.emit()
+        self.accept()
 
 
 class ActionConfigDialog(QDialog):
